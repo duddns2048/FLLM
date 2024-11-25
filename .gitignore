@@ -1,0 +1,11 @@
+*.tar
+*.jpg
+*.jpeg
+*.png
+*.txt
+*.yaml
+*.xml
+*.pyc
+*.pth
+*.JPEG
+*.tar.gz
