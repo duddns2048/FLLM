@@ -167,7 +167,7 @@ def get_args_parser():
                         choices=['kingdom', 'phylum', 'class', 'order', 'supercategory', 'family', 'genus', 'name'],
                         type=str, help='semantic granularity')
 
-    parser.add_argument('--output_dir', default='',
+    parser.add_argument('--output_dir', default='./results',
                         help='path where to save, empty for no saving')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
@@ -237,7 +237,9 @@ def main(args):
     else:
         print('Not using distributed mode')
         args.distributed = False
-
+        
+    os.makedirs(os.path.join(args.output_dir, args.exp_name), exist_ok=True)
+    
     print(args)
 
     if args.distillation_type != 'none' and args.finetune and not args.eval:
@@ -267,7 +269,7 @@ def main(args):
             sampler_train = torch.utils.data.DistributedSampler(
                 dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
             )
-        if args.dist_eval:
+        if args.dist_eval: # default False
             if len(dataset_val) % num_tasks != 0:
                 print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
                       'This will slightly alter validation results as extra duplicate entries are added to achieve '
@@ -298,7 +300,7 @@ def main(args):
 
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
-    if mixup_active:
+    if mixup_active: # default True
         mixup_fn = Mixup(
             mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
@@ -315,7 +317,7 @@ def main(args):
     )
 
 
-    if args.finetune:
+    if args.finetune: # default False
         if args.finetune.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.finetune, map_location='cpu', check_hash=True)
@@ -363,7 +365,7 @@ def main(args):
     model.to(device)
 
     model_ema = None
-    if args.model_ema:
+    if args.model_ema: # default True
         # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
         model_ema = ModelEma(
             model,
@@ -397,7 +399,7 @@ def main(args):
         criterion = torch.nn.CrossEntropyLoss()
 
     teacher_model = None
-    if args.distillation_type != 'none':
+    if args.distillation_type != 'none': # default False
         assert args.teacher_path, 'need to specify teacher-path when using distillation'
         print(f"Creating teacher model: {args.teacher_model}")
         teacher_model = create_model(
