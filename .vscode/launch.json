@@ -15,7 +15,7 @@
                 "--model", "vit_small_patch16_224",
                 "--data-path", "./",
                 "--eval",
-                "--resume", "./image_classification/checkpoints/vit_small_patch16_224/checkpoint.pth"
+                "--resume", "./image_classification/outputs/vit_small_patch16_224/checkpoint.pth"
 
             ]
         }

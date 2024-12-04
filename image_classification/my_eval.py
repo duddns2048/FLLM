@@ -28,11 +28,6 @@ from utils import RASampler
 import utils
 from optimizer_utils import my_create_optimizer
 
-
-import warnings
-warnings.filterwarnings("ignore")
-
-
 def get_args_parser():
     parser = argparse.ArgumentParser('RVT training and evaluation script', add_help=False)
     parser.add_argument('--exp_name', default='debug', type=str)
@@ -202,94 +197,23 @@ def get_args_parser():
     parser.add_argument("--test_every", default=1, type=int)
     return parser
 
-def setup_for_distributed(is_master):
-    """
-    This function disables printing when not in master process
-    """
-    import builtins as __builtin__
-    builtin_print = __builtin__.print
+if __name__ == '__main__':
 
-    def print(*args, **kwargs):
-        force = kwargs.pop('force', False)
-        if is_master or force:
-            builtin_print(*args, **kwargs)
+    parser = argparse.ArgumentParser('DeiT training and evaluation script', parents=[get_args_parser()])
+    args = parser.parse_args()
 
-    __builtin__.print = print
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
-def main(args):
-    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        args.distributed = True
-        torch.cuda.set_device(args.local_rank)
-        args.dist_backend = 'nccl'
-        torch.distributed.init_process_group(backend='nccl', init_method=args.dist_url)
-        args.world_size = torch.distributed.get_world_size()
-        args.rank = torch.distributed.get_rank()
-        print('| distributed init {}(rank {})'.format(
-                args.world_size, args.rank), flush=True)
-        torch.distributed.barrier(device_ids=[int(os.environ["LOCAL_RANK"])])
-        setup_for_distributed(args.rank == 0)
-        if args.rank == 0:
-            os.makedirs(os.path.join(args.output_dir, args.model), exist_ok=True)
-            os.makedirs(os.path.join(args.output_dir, args.model, args.exp_name), exist_ok=True)
-        if args.rank == 0 and args.wandb:
-            wandb.init(project='ViTs', entity='ziqipang-share', name=f'{args.model}:{args.exp_name}', 
-                dir=os.path.join('./wandb', args.model, args.exp_name))
-    else:
-        print('Not using distributed mode')
-        args.distributed = False
-        
     os.makedirs(os.path.join(args.output_dir, args.exp_name), exist_ok=True)
-    
-    print(args)
-
-    if args.distillation_type != 'none' and args.finetune and not args.eval: # default False
-        raise NotImplementedError("Finetuning with distillation not yet supported")
 
     device = torch.device(args.device)
-
-    # fix the seed for reproducibility
-    seed = args.seed + utils.get_rank()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    # random.seed(seed)
-
-    cudnn.benchmark = True
-
-    dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
+    
+    # dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
     dataset_val, _ = build_dataset(is_train=False, args=args)
-
-    if True:  # args.distributed:
-        num_tasks = utils.get_world_size()
-        global_rank = utils.get_rank()
-        if args.repeated_aug: # default True
-            sampler_train = RASampler(
-                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-            )
-        else:
-            sampler_train = torch.utils.data.DistributedSampler(
-                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-            )
-        if args.dist_eval: # default False
-            if len(dataset_val) % num_tasks != 0:
-                print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
-                      'This will slightly alter validation results as extra duplicate entries are added to achieve '
-                      'equal num of samples per-process.')
-            sampler_val = torch.utils.data.DistributedSampler(
-                dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
-        else:
-            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-    else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-
-    data_loader_train = torch.utils.data.DataLoader(
-        dataset_train, sampler=sampler_train,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-    )
-
+    
+    # sampler_train = torch.utils.data.RandomSampler(dataset_train)
+    sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+    
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val, sampler=sampler_val,
         batch_size=int(args.batch_size),
@@ -297,7 +221,7 @@ def main(args):
         pin_memory=args.pin_mem,
         drop_last=False
     )
-
+    
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
     if mixup_active: # default True
@@ -305,7 +229,8 @@ def main(args):
             mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
-
+        
+    
     print(f"Creating model: {args.model}")
     model = create_model(
         args.model,
@@ -315,45 +240,7 @@ def main(args):
         drop_path_rate=args.drop_path,
         drop_block_rate=None
     )
-
-
-    if args.finetune: # default False
-        if args.finetune.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.finetune, map_location='cpu', check_hash=True)
-        else:
-            checkpoint = torch.load(args.finetune, map_location='cpu')
-
-        checkpoint_model = checkpoint['model']
-        state_dict = model.state_dict()
-        for k in ['head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias']:
-            if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
-                print(f"Removing key {k} from pretrained checkpoint")
-                del checkpoint_model[k]
-
-        # interpolate position embedding
-        pos_embed_checkpoint = checkpoint_model['pos_embed']
-        embedding_size = pos_embed_checkpoint.shape[-1]
-        num_patches = model.patch_embed.num_patches
-        num_extra_tokens = model.pos_embed.shape[-2] - num_patches
-        # height (== width) for the checkpoint position embedding
-        orig_size = int((pos_embed_checkpoint.shape[-2] - num_extra_tokens) ** 0.5)
-        # height (== width) for the new position embedding
-        new_size = int(num_patches ** 0.5)
-        # class_token and dist_token are kept unchanged
-        extra_tokens = pos_embed_checkpoint[:, :num_extra_tokens]
-        # only the position tokens are interpolated
-        pos_tokens = pos_embed_checkpoint[:, num_extra_tokens:]
-        pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size, embedding_size).permute(0, 3, 1, 2)
-        pos_tokens = torch.nn.functional.interpolate(
-            pos_tokens, size=(new_size, new_size), mode='bicubic', align_corners=False)
-        pos_tokens = pos_tokens.permute(0, 2, 3, 1).flatten(1, 2)
-        new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
-        checkpoint_model['pos_embed'] = new_pos_embed
-
-        model.load_state_dict(checkpoint_model, strict=False)
     
-    # load llama checkpoint for the encoder layer
     if 'llama' in args.model:
         print("Loading LLaMA checkpoints")
         start_time = time.time()
@@ -363,7 +250,7 @@ def main(args):
         model.llama.custom_load_state_dict(checkpoint, tail=True, strict=False)
         print(f"Loaded in {time.time() - start_time:.2f} seconds") 
     model.to(device)
-
+    
     model_ema = None
     if args.model_ema: # default True
         # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
@@ -372,12 +259,9 @@ def main(args):
             decay=args.model_ema_decay,
             device='cpu' if args.model_ema_force_cpu else '',
             resume='')
-
+    
     model_without_ddp = model
-    if args.distributed: # default False
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank])
-        model_without_ddp = model.module
-        print('Distributed')
+    
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
@@ -387,45 +271,18 @@ def main(args):
     loss_scaler = NativeScaler()
 
     lr_scheduler, _ = create_scheduler(args, optimizer)
-
-    criterion = LabelSmoothingCrossEntropy()
-
-    if args.mixup > 0.: # default 0.8, True
-        # smoothing is handled with mixup label transform
-        criterion = SoftTargetCrossEntropy()
-    elif args.smoothing:
-        criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
-    else:
-        criterion = torch.nn.CrossEntropyLoss()
-
     teacher_model = None
-    if args.distillation_type != 'none': # default False
-        assert args.teacher_path, 'need to specify teacher-path when using distillation'
-        print(f"Creating teacher model: {args.teacher_model}")
-        teacher_model = create_model(
-            args.teacher_model,
-            pretrained=False,
-            num_classes=args.nb_classes,
-            global_pool='avg',
-        )
-        if args.teacher_path.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.teacher_path, map_location='cpu', check_hash=True)
-        else:
-            checkpoint = torch.load(args.teacher_path, map_location='cpu')
-        teacher_model.load_state_dict(checkpoint['model'])
-        teacher_model.to(device)
-        teacher_model.eval()
-
-    # wrap the criterion in our custom DistillationLoss, which
-    # just dispatches to the original criterion if args.distillation_type is 'none'
+    
+    criterion = LabelSmoothingCrossEntropy()
     criterion = DistillationLoss(
         criterion, teacher_model, args.distillation_type, args.distillation_alpha, args.distillation_tau
     )
 
+    
     output_dir = Path(args.output_dir)
     output_dir = os.path.join(output_dir, args.exp_name)  
-    if args.resume and os.path.isfile(args.resume): # default False
+    
+    if args.resume and os.path.isfile(args.resume):
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.resume, map_location='cpu', check_hash=True)
@@ -440,7 +297,8 @@ def main(args):
                 utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
             if 'scaler' in checkpoint:
                 loss_scaler.load_state_dict(checkpoint['scaler'])
-
+                
+    
     if args.eval:
 
         test_transform = build_transform(False, args)
@@ -537,75 +395,3 @@ def main(args):
             test_stats = evaluate(data_loader_val, model, device, epoch, adv='PGD')
             print(f"Accuracy of the PGD: {test_stats['acc1']:.1f}%")
 
-        return
-
-    print(f"Start training for {args.epochs} epochs")
-    start_time = time.time()
-    max_accuracy = 0.0
-    for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            data_loader_train.sampler.set_epoch(epoch)
-
-        train_stats = train_one_epoch(
-            args, model, criterion, data_loader_train,
-            optimizer, optimizer_parameters, device, epoch, loss_scaler,
-            args.clip_grad, model_ema, mixup_fn,
-            set_training_mode=args.finetune == '',  # keep in eval mode during finetuning,
-            use_wandb=args.wandb
-        )
-
-        lr_scheduler.step(epoch)
-
-        if (epoch+1) % args.test_every == 0:
-            if args.output_dir:
-                checkpoint_paths = [os.path.join(output_dir, 'checkpoint.pth')]
-                for checkpoint_path in checkpoint_paths:
-                    utils.save_on_master({
-                        'model': model_without_ddp.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'lr_scheduler': lr_scheduler.state_dict(),
-                        'epoch': epoch,
-                        'model_ema': get_state_dict(model_ema),
-                        'scaler': loss_scaler.state_dict(),
-                        'args': args,
-                    }, checkpoint_path)
-
-            test_stats = evaluate(data_loader_val, model, device, epoch)
-            print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
-            if test_stats["acc1"] > max_accuracy:
-                checkpoint_paths = [os.path.join(output_dir, 'best_model.pth')]
-                for checkpoint_path in checkpoint_paths:
-                    utils.save_on_master({
-                        'model': model_without_ddp.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'lr_scheduler': lr_scheduler.state_dict(),
-                        'epoch': epoch,
-                        'model_ema': get_state_dict(model_ema),
-                        'scaler': loss_scaler.state_dict(),
-                        'args': args,
-                    }, checkpoint_path)
-            max_accuracy = max(max_accuracy, test_stats["acc1"])
-            print(f'Max accuracy: {max_accuracy:.2f}%')
-
-            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                         **{f'test_{k}': v for k, v in test_stats.items()},
-                         'epoch': epoch,
-                         'n_parameters': n_parameters}
-
-            if args.output_dir and utils.is_main_process():
-                with open(os.path.join(output_dir, "log.txt"), "a") as f:
-                    f.write(json.dumps(log_stats) + "\n")
-
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Training time {}'.format(total_time_str))
-
-
-if __name__ == '__main__':
-
-    parser = argparse.ArgumentParser('DeiT training and evaluation script', parents=[get_args_parser()])
-    args = parser.parse_args()
-
-    if args.output_dir:
-        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-        main(args)

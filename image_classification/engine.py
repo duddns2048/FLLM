@@ -23,7 +23,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
-def save_predictions(images, activation_map, save_dir='./image_classification/feature_activation'):
+def save_predictions(images, activation_map, save_dir='./', i=0, epoch=None):
     # os.makedirs(save_dir, exist_ok=True)
 
     # Convert tensors to numpy arrays for visualization
@@ -45,7 +45,7 @@ def save_predictions(images, activation_map, save_dir='./image_classification/fe
     ax[2].set_title('f_act mask')
     ax[2].axis('off')
 
-    save_path = os.path.join(save_dir, f'f_act.png')
+    save_path = os.path.join(save_dir, f'f_act_e{epoch}_{i}.png')
     plt.savefig(save_path, bbox_inches='tight')
     # plt.savefig(save_dir, bbox_inches='tight')
     plt.close(fig)  # Close the figure to free memory
@@ -100,7 +100,7 @@ def train_one_epoch(args, model: torch.nn.Module, criterion: DistillationLoss,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,
                     set_training_mode=True, use_wandb=False):
     model.train(set_training_mode)
-    metric_logger = utils.MetricLogger(delimiter="  ", use_wandb=use_wandb)
+    metric_logger = utils.MetricLogger(delimiter=" | ", use_wandb=use_wandb)
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
@@ -111,6 +111,25 @@ def train_one_epoch(args, model: torch.nn.Module, criterion: DistillationLoss,
     lower_limit = ((0 - mu_imagenet)/ std_imagenet)
 
     i = 0
+    # for samples, targets in tqdm(data_loader):
+    #     samples = samples.to(device, non_blocking=True)
+    #     targets = targets.to(device, non_blocking=True)
+        
+        
+    #     optimizer.zero_grad()
+    #     outputs = model(samples)
+    #     loss = criterion(samples, outputs, targets)
+
+    #     loss_value += loss.item()
+        
+    #     if not math.isfinite(loss_value):
+    #         print(f"Loss is {loss_value}, stopping training"))
+    #         sys.exit(1)
+            
+    #     loss.backward()
+    #     optimizer.step()
+            
+        
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
         # if i % 100 == 0:
         #     model.module.update_L(lam=0.1)
@@ -119,10 +138,10 @@ def train_one_epoch(args, model: torch.nn.Module, criterion: DistillationLoss,
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
-        if mixup_fn is not None:
+        if mixup_fn is not None: #True
             samples, targets = mixup_fn(samples, targets)
 
-        if args.use_patch_aug:
+        if args.use_patch_aug: # default False
             patch_transform = nn.Sequential(
                 K.augmentation.RandomResizedCrop(size=(16,16), scale=(0.85,1.0), ratio=(1.0,1.0), p=0.1),
                 K.augmentation.RandomGaussianNoise(mean=0., std=0.01, p=0.1),
@@ -133,7 +152,7 @@ def train_one_epoch(args, model: torch.nn.Module, criterion: DistillationLoss,
         is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
 
         with torch.cuda.amp.autocast():
-            if args.use_patch_aug:
+            if args.use_patch_aug: # default False
                 outputs2 = model(aug_samples)
                 loss = criterion(aug_samples, outputs2, targets)
                 if args.recon_loss > 1e-4:
@@ -158,7 +177,7 @@ def train_one_epoch(args, model: torch.nn.Module, criterion: DistillationLoss,
                     parameters=model.parameters(), create_graph=is_second_order)
 
         torch.cuda.synchronize()
-        if model_ema is not None:
+        if model_ema is not None: # default True
             model_ema.update(model)
 
         metric_logger.update(loss=loss_value)
@@ -173,12 +192,12 @@ def train_one_epoch(args, model: torch.nn.Module, criterion: DistillationLoss,
 
 
 @torch.no_grad()
-def evaluate(data_loader, model, device, mask=None, adv=None):
+def evaluate(data_loader, model, device, epoch, output_dir, mask=None, adv=None):
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Test:'
-
+    i=0
     # switch to evaluation mode
     model.eval()
 
@@ -214,17 +233,17 @@ def evaluate(data_loader, model, device, mask=None, adv=None):
         # visual_tokens = feature_map[:, 1:, :].cpu().detach().numpy()  # Exclude [CLS] token
         # avg_activations = np.mean(visual_tokens, axis=-1)
         # activation_map = avg_activations.reshape(-1, 14, 14)
-        
-        visual_tokens = feature_map[0, 1:, :].cpu().detach().numpy()  # Exclude [CLS] token
-        avg_token_feature = np.mean(visual_tokens, axis=0)
-        # activation = (visual_tokens - avg_token_feature).norm(dim=-1)
-        activation = np.linalg.norm(visual_tokens - avg_token_feature, axis=-1)
+                
+        if i < 5:
+            visual_tokens = feature_map[i, 1:, :].cpu().detach().numpy()  # Exclude [CLS] token
+            avg_token_feature = np.mean(visual_tokens, axis=0)
+            # activation = (visual_tokens - avg_token_feature).norm(dim=-1)
+            activation = np.linalg.norm(visual_tokens - avg_token_feature, axis=-1)
 
-        mag_min, mag_max = activation.min(), activation.max()
-        mag_activation = (activation - mag_min) / (mag_max - mag_min)
-        activation_map = mag_activation.reshape(14, 14)
-        
-        save_predictions(images[0], activation_map, save_dir='./image_classification/feature_activation')
+            mag_min, mag_max = activation.min(), activation.max()
+            mag_activation = (activation - mag_min) / (mag_max - mag_min)
+            activation_map = mag_activation.reshape(14, 14)
+            save_predictions(images[i], activation_map, save_dir=os.path.join(output_dir,'./feature_activation'), i=i, epoch=epoch)
 
         
 
