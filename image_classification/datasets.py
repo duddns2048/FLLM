@@ -129,7 +129,7 @@ def build_dataset(is_train, args):
             dataset = ImageTarDataset(root, return_labels=True, transform=transform)
         elif args.data_type == 'folder':
             # root = os.path.join(args.data_path, 'train' if is_train else 'val')
-            root = os.path.join(args.data_path, 'val' if is_train else 'val')
+            root = os.path.join(args.data_path, 'train' if is_train else 'val')
             dataset = datasets.ImageFolder(root, transform=transform)
         nb_classes = 1000
     elif args.data_set == 'INAT':

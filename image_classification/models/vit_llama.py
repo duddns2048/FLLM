@@ -166,7 +166,7 @@ class ViTLLaMA(nn.Module):
     def forward(self, x):
         x = self.forward_features(x)
         out = self.forward_head(x)
-        return out
+        return out, x
 
 
 def init_weights_vit_timm(module: nn.Module, name: str = ''):

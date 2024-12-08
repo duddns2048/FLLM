@@ -23,11 +23,21 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
+from PIL import Image
+
+def hook_fn(module, input, output):
+    # feature_map = []
+    global feature_map
+    feature_map.append(output.detach().cpu())
+
 def save_predictions(images, activation_map, save_dir='./', i=0, epoch=None):
     # os.makedirs(save_dir, exist_ok=True)
 
     # Convert tensors to numpy arrays for visualization
     images_np = images.cpu().detach().numpy().transpose(1, 2, 0)
+    images_np = (images_np-images_np.min())/(images_np.max()-images_np.min()) *255
+    images_np = images_np.astype('uint8')
+    images_pil = Image.fromarray(images.cpu().detach().numpy().transpose(1, 2, 0).astype('uint8'))
     activation_map_np = activation_map
     output_np = (activation_map_np > 0.5)
 
@@ -138,7 +148,7 @@ def train_one_epoch(args, model: torch.nn.Module, criterion: DistillationLoss,
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
-        if mixup_fn is not None: #True
+        if mixup_fn is not None: # default True
             samples, targets = mixup_fn(samples, targets)
 
         if args.use_patch_aug: # default False
@@ -161,7 +171,7 @@ def train_one_epoch(args, model: torch.nn.Module, criterion: DistillationLoss,
                 outputs = model(samples)
                 loss = criterion(samples, outputs, targets)
             else:
-                outputs = model(samples)
+                outputs, feature_map = model(samples)
                 loss = criterion(samples, outputs, targets)
 
         loss_value = loss.item()
@@ -175,13 +185,20 @@ def train_one_epoch(args, model: torch.nn.Module, criterion: DistillationLoss,
         # this attribute is added by timm on one optimizer (adahessian)
         loss_scaler(loss, optimizer, clip_grad=max_norm,
                     parameters=model.parameters(), create_graph=is_second_order)
+        
+        # acc1, acc5 = accuracy(outputs, targets, topk=(1, 5))
+        batch_size = samples.shape[0]
+        
 
         torch.cuda.synchronize()
         if model_ema is not None: # default True
             model_ema.update(model)
 
+        # metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
+        # metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        
 
         # normalize the FFT kernel
         # model.module.normalize_parameters()
@@ -200,10 +217,15 @@ def evaluate(data_loader, model, device, epoch, output_dir, mask=None, adv=None)
     i=0
     # switch to evaluation mode
     model.eval()
+    
+    # feature_map = []
+    # model.module.norm.register_forward_hook(hook_fn)
 
+    os.makedirs(os.path.join(output_dir,'./feature_activation'), exist_ok=True)
     for images, target in metric_logger.log_every(data_loader, 10, header):
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
+        i+=1
 
         if adv == 'FGSM':
             std_imagenet = torch.tensor((0.229, 0.224, 0.225)).view(3,1,1).cuda()
@@ -233,17 +255,19 @@ def evaluate(data_loader, model, device, epoch, output_dir, mask=None, adv=None)
         # visual_tokens = feature_map[:, 1:, :].cpu().detach().numpy()  # Exclude [CLS] token
         # avg_activations = np.mean(visual_tokens, axis=-1)
         # activation_map = avg_activations.reshape(-1, 14, 14)
-                
-        if i < 5:
-            visual_tokens = feature_map[i, 1:, :].cpu().detach().numpy()  # Exclude [CLS] token
-            avg_token_feature = np.mean(visual_tokens, axis=0)
-            # activation = (visual_tokens - avg_token_feature).norm(dim=-1)
-            activation = np.linalg.norm(visual_tokens - avg_token_feature, axis=-1)
+        
+        if epoch%10==0:
+            if ((i % 50)<5) and i<500: # i must smaller than batch size
+                j= i % 50
+                visual_tokens = feature_map[j, 1:, :].cpu().detach().numpy()  # Exclude [CLS] token
+                avg_token_feature = np.mean(visual_tokens, axis=0)
+                # activation = (visual_tokens - avg_token_feature).norm(dim=-1)
+                activation = np.linalg.norm(visual_tokens - avg_token_feature, axis=-1)
 
-            mag_min, mag_max = activation.min(), activation.max()
-            mag_activation = (activation - mag_min) / (mag_max - mag_min)
-            activation_map = mag_activation.reshape(14, 14)
-            save_predictions(images[i], activation_map, save_dir=os.path.join(output_dir,'./feature_activation'), i=i, epoch=epoch)
+                mag_min, mag_max = activation.min(), activation.max()
+                mag_activation = (activation - mag_min) / (mag_max - mag_min)
+                activation_map = mag_activation.reshape(14, 14)
+                save_predictions(images[j], activation_map, save_dir=os.path.join(output_dir,'./feature_activation'), i=i, epoch=epoch)
 
         
 
@@ -259,7 +283,7 @@ def evaluate(data_loader, model, device, epoch, output_dir, mask=None, adv=None)
         metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
-    print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
+    print('================== Acc@1 {top1.global_avg:.3f} | Acc@5 {top5.global_avg:.3f} | loss {losses.global_avg:.3f}==================='
           .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}

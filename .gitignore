@@ -9,3 +9,5 @@
 *.pth
 *.JPEG
 *.tar.gz
+*.json
+*.csv

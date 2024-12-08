@@ -1,7 +1,5 @@
+
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
         {
@@ -10,14 +8,21 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "justMyCode": true,
-            "args":[
+            "args": [
+                "--exp_name", "ViT-S-recon",
                 "--model", "vit_small_patch16_224",
                 "--data-path", "./",
+                "--output_dir", "./image_classification/outputs",
+                "--num_workers", "32",
+                "--batch-size", "32",
+                "--epochs", "300",
+                "--warmup-epochs", "20",
                 "--eval",
-                "--resume", "./image_classification/outputs/vit_small_patch16_224/checkpoint.pth"
+                "--resume", "./image_classification/outputs/ViT-S-recon/train/checkpoint.pth",
 
-            ]
+
+                "--metric_dataframe"
+            ],
         }
     ]
 }

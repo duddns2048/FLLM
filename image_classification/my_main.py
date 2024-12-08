@@ -27,14 +27,16 @@ from utils import RASampler
 import utils
 from optimizer_utils import my_create_optimizer
 import matplotlib.pyplot as plt
+import pandas as pd
+import sys
 
-def plot_loss(save_dir, train_losses, valid_losses, plot):
+def plot_graph(save_dir, train_losses, valid_losses, plot):
     plt.figure(figsize=(10, 6))
-    plt.plot(train_losses, label='Train Loss')
-    plt.plot(valid_losses, label='Valid Loss')
+    plt.plot(train_losses, label=f'Train {plot}')
+    plt.plot(valid_losses, label=f'Valid {plot}')
     plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training and Validation Loss per Epoch')
+    plt.ylabel(f'{plot}')
+    plt.title(f'Training and Validation {plot} per Epoch')
     plt.legend()
     plt.grid(True)
 
@@ -47,6 +49,7 @@ def get_args_parser():
     parser.add_argument('--exp_name', default='debug', type=str)
     parser.add_argument('--batch-size', default=16, type=int)
     parser.add_argument('--epochs', default=300, type=int)
+    parser.add_argument('--metric_dataframe', action='store_true', help="save metric dataframe csv file.")
 
     # Logging parameters
     parser.add_argument('--wandb', action='store_true', default=False)
@@ -218,7 +221,20 @@ if __name__ == '__main__':
     
     os.makedirs(os.path.join(args.output_dir), exist_ok=True)
     os.makedirs(os.path.join(args.output_dir, args.exp_name), exist_ok=True)
-    output_dir = os.path.join(args.output_dir, args.exp_name)
+    os.makedirs(os.path.join(args.output_dir, args.exp_name,  'train'), exist_ok=True)
+    output_dir = os.path.join(args.output_dir, args.exp_name, 'train')
+    
+    # save args
+    args_dict = vars(args)
+    with open(os.path.join(output_dir,'args.json'), 'w') as json_file:
+        json.dump(args_dict, json_file, indent=4)
+    
+    # save command order
+    command_file_name = './train_command.txt' if not args.eval else './test_command.txt'
+    command_line_arguments = ' '.join(sys.argv)
+    with open(os.path.join(output_dir, command_file_name), 'w') as f:
+        f.write(command_line_arguments)
+    
     
     seed = args.seed
     torch.manual_seed(seed)
@@ -310,18 +326,39 @@ if __name__ == '__main__':
     criterion = DistillationLoss(
         criterion, teacher_model, args.distillation_type, args.distillation_alpha, args.distillation_tau
     )
-        
+    
+    train_loss_list=[]
+    train_acc1_list=[]
+    train_acc5_list=[]
+    test_loss_list=[]
+    test_acc1_list=[]
+    test_acc5_list=[]
+     
+    if args.resume and os.path.isfile(args.resume): # default False
+        checkpoint = torch.load(args.resume, map_location='cpu')
+        model_without_ddp.load_state_dict(checkpoint['model'])
+        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+            args.start_epoch = checkpoint['epoch'] + 1
+            if args.model_ema:
+                utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
+            if 'scaler' in checkpoint:
+                loss_scaler.load_state_dict(checkpoint['scaler'])
+            df = pd.read_csv(f'{output_dir}/train_log.csv')
+            train_loss_list = list(df['train_loss'])
+            test_loss_list=list(df['test_loss'])
+            test_acc1_list=list(df['acc1'])
+            test_acc5_list=list(df['acc5'])
+    
+    
     start_time = time.time()
     max_accuracy = 0.0
-    train_loss_list=[]
-    train_acc_list=[]
-    test_loss_list=[]
-    test_acc_list=[]
     
     for epoch in range(args.start_epoch, args.epochs):
         # if args.distributed:
         #     data_loader_train.sampler.set_epoch(epoch)
-
+        
         train_stats = train_one_epoch(
             args, model, criterion, data_loader_train,
             optimizer, optimizer_parameters, device, epoch, loss_scaler,
@@ -332,6 +369,8 @@ if __name__ == '__main__':
 
         lr_scheduler.step(epoch)
         train_loss_list.append(train_stats['loss'])
+        # train_acc1_list.append(train_stats['acc1'])
+        # train_acc5_list.append(train_stats['acc5'])
         
         if (epoch+1) % args.test_every == 0:
             if args.output_dir:
@@ -350,8 +389,10 @@ if __name__ == '__main__':
 
             test_stats = evaluate(data_loader_val, model, device, epoch, output_dir)
             test_loss_list.append(test_stats['loss'])
+            test_acc1_list.append(test_stats['acc1'])
+            test_acc5_list.append(test_stats['acc5'])
             
-            print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+            print(f"============= Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}% =============")
             if test_stats["acc1"] > max_accuracy:
                 checkpoint_paths = [os.path.join(output_dir, 'best_model.pth')]
                 for checkpoint_path in checkpoint_paths:
@@ -365,7 +406,7 @@ if __name__ == '__main__':
                         'args': args,
                     }, checkpoint_path)
             max_accuracy = max(max_accuracy, test_stats["acc1"])
-            print(f'Max accuracy: {max_accuracy:.2f}%')
+            print(f'================== Max accuracy: {max_accuracy:.2f}% ==================')
 
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                          **{f'test_{k}': v for k, v in test_stats.items()},
@@ -375,7 +416,22 @@ if __name__ == '__main__':
             if args.output_dir and utils.is_main_process():
                 with open(os.path.join(output_dir, "log.txt"), "a") as f:
                     f.write(json.dumps(log_stats) + "\n")
-        plot_loss(output_dir, train_loss_list, test_loss_list,'loss')
+                    
+        if args.metric_dataframe:
+            epoch_data = {
+                "epoch": list(range(1, epoch + 2)),
+                "acc1" : test_acc1_list,
+                "acc5" : test_acc5_list,
+                "train_loss" : train_loss_list,
+                "test_loss" : test_loss_list,
+            }
+            df = pd.DataFrame(epoch_data)
+            csv_path = os.path.join(output_dir, 'train_log.csv')
+            df.to_csv(csv_path, index=False)
+            
+        plot_graph(output_dir, train_loss_list, test_loss_list,'loss')
+        plot_graph(output_dir, test_acc1_list, test_acc1_list,'acc1')
+        plot_graph(output_dir, test_acc5_list, test_acc5_list,'acc5')
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))

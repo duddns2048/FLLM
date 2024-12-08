@@ -6,6 +6,7 @@ import datetime
 import numpy as np
 import time
 import torch
+import torch.nn as nn
 import torch.backends.cudnn as cudnn
 import torchvision
 import json
@@ -28,11 +29,14 @@ from utils import RASampler
 import utils
 from optimizer_utils import my_create_optimizer
 
+import sys
+
 def get_args_parser():
     parser = argparse.ArgumentParser('RVT training and evaluation script', add_help=False)
     parser.add_argument('--exp_name', default='debug', type=str)
     parser.add_argument('--batch-size', default=16, type=int)
     parser.add_argument('--epochs', default=300, type=int)
+    parser.add_argument('--metric_dataframe', action='store_true', help="save metric dataframe csv file.")
 
     # Logging parameters
     parser.add_argument('--wandb', action='store_true', default=False)
@@ -202,14 +206,27 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser('DeiT training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
 
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-
+    os.makedirs(os.path.join(args.output_dir), exist_ok=True)
     os.makedirs(os.path.join(args.output_dir, args.exp_name), exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, args.exp_name, 'eval'), exist_ok=True)
+    output_dir = os.path.join(args.output_dir, args.exp_name, 'eval')
 
-    device = torch.device(args.device)
+    # save args
+    args_dict = vars(args)
+    args_file_name = './train_args.json' if not args.eval else './test_args.json'
+    with open(os.path.join(output_dir,args_file_name), 'w') as json_file:
+        json.dump(args_dict, json_file, indent=4)
+    
+    # save command order
+    command_file_name = './train_command.txt' if not args.eval else './test_command.txt'
+    command_line_arguments = ' '.join(sys.argv)
+    with open(os.path.join(output_dir, command_file_name), 'w') as f:
+        f.write(command_line_arguments)
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
-    dataset_val, _ = build_dataset(is_train=False, args=args)
+    dataset_val, args.nb_classes = build_dataset(is_train=False, args=args)
     
     # sampler_train = torch.utils.data.RandomSampler(dataset_train)
     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
@@ -221,14 +238,6 @@ if __name__ == '__main__':
         pin_memory=args.pin_mem,
         drop_last=False
     )
-    
-    mixup_fn = None
-    mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
-    if mixup_active: # default True
-        mixup_fn = Mixup(
-            mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
-            prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
-            label_smoothing=args.smoothing, num_classes=args.nb_classes)
         
     
     print(f"Creating model: {args.model}")
@@ -249,6 +258,9 @@ if __name__ == '__main__':
         checkpoint = torch.load(ckpt_path, map_location="cpu")
         model.llama.custom_load_state_dict(checkpoint, tail=True, strict=False)
         print(f"Loaded in {time.time() - start_time:.2f} seconds") 
+        
+    if torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)  
     model.to(device)
     
     model_ema = None
@@ -265,12 +277,12 @@ if __name__ == '__main__':
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
-    linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
-    args.lr = linear_scaled_lr
-    optimizer, optimizer_parameters = my_create_optimizer(args, model_without_ddp, param_filter=args.param_filter)
+    # linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
+    # args.lr = linear_scaled_lr
+    # optimizer, optimizer_parameters = my_create_optimizer(args, model_without_ddp, param_filter=args.param_filter)
     loss_scaler = NativeScaler()
 
-    lr_scheduler, _ = create_scheduler(args, optimizer)
+    # lr_scheduler, _ = create_scheduler(args, optimizer)
     teacher_model = None
     
     criterion = LabelSmoothingCrossEntropy()
@@ -278,34 +290,18 @@ if __name__ == '__main__':
         criterion, teacher_model, args.distillation_type, args.distillation_alpha, args.distillation_tau
     )
 
-    
-    output_dir = Path(args.output_dir)
-    output_dir = os.path.join(output_dir, args.exp_name)  
-    
+        
     if args.resume and os.path.isfile(args.resume):
-        if args.resume.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.resume, map_location='cpu', check_hash=True)
-        else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            args.start_epoch = checkpoint['epoch'] + 1
-            if args.model_ema:
-                utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
-            if 'scaler' in checkpoint:
-                loss_scaler.load_state_dict(checkpoint['scaler'])
-                
-    
+        checkpoint = torch.load(args.resume, map_location='cpu')
+        model.load_state_dict(checkpoint['model'])
+                    
     if args.eval:
 
         test_transform = build_transform(False, args)
 
         if not (args.inc_path or args.ina_path or args.inr_path or args.insk_path or args.pgd_test or args.fgsm_test):
-            test_stats = evaluate(data_loader_val, model, device, epoch)
-            print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+            test_stats = evaluate(data_loader_val, model, device, epoch=10, output_dir=output_dir)
+            print(f"Accuracy of the network on the {len(dataset_val)} test images: acc@1-{test_stats['acc1']:.1f}% | acc@5-{test_stats['acc5']:.1f}%")
 
         if args.inc_path:
             result_dict = {}
