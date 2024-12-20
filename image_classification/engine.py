@@ -24,20 +24,19 @@ import matplotlib.pyplot as plt
 import os
 
 from PIL import Image
+import pandas as pd
 
 def hook_fn(module, input, output):
     # feature_map = []
     global feature_map
     feature_map.append(output.detach().cpu())
 
-def save_predictions(images, activation_map, save_dir='./', i=0, epoch=None):
-    # os.makedirs(save_dir, exist_ok=True)
-
+def save_predictions(images, activation_map, predicted_prob, save_dir='./', j=0):
     # Convert tensors to numpy arrays for visualization
     images_np = images.cpu().detach().numpy().transpose(1, 2, 0)
     images_np = (images_np-images_np.min())/(images_np.max()-images_np.min()) *255
     images_np = images_np.astype('uint8')
-    images_pil = Image.fromarray(images.cpu().detach().numpy().transpose(1, 2, 0).astype('uint8'))
+    # images_pil = Image.fromarray(images.cpu().detach().numpy().transpose(1, 2, 0).astype('uint8'))
     activation_map_np = activation_map
     output_np = (activation_map_np > 0.5)
 
@@ -48,16 +47,17 @@ def save_predictions(images, activation_map, save_dir='./', i=0, epoch=None):
     ax[0].axis('off')
 
     ax[1].imshow(activation_map_np, cmap='viridis') # 'hot'
-    ax[1].set_title('feature activation')
+    ax[1].set_title('Feature activation')
     ax[1].axis('off')
 
     ax[2].imshow(output_np, cmap='gray') # 'jet' | 'tab20'
-    ax[2].set_title('f_act mask')
+    ax[2].set_title('Seg mask(0.5)')
     ax[2].axis('off')
+    
+    fig.suptitle(f'Predicted Probability: {predicted_prob:.2f}', fontsize=16)
 
-    save_path = os.path.join(save_dir, f'f_act_e{epoch}_{i}.png')
+    save_path = os.path.join(save_dir, f'FAM_{j}.png')
     plt.savefig(save_path, bbox_inches='tight')
-    # plt.savefig(save_dir, bbox_inches='tight')
     plt.close(fig)  # Close the figure to free memory
 
 def clamp(X, lower_limit, upper_limit):
@@ -209,23 +209,22 @@ def train_one_epoch(args, model: torch.nn.Module, criterion: DistillationLoss,
 
 
 @torch.no_grad()
-def evaluate(data_loader, model, device, epoch, output_dir, mask=None, adv=None):
+def evaluate(data_loader, model, device, args, output_dir, mask=None, adv=None):
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Test:'
     i=0
+    acc_each_class=[]
     # switch to evaluation mode
     model.eval()
     
     # feature_map = []
     # model.module.norm.register_forward_hook(hook_fn)
 
-    os.makedirs(os.path.join(output_dir,'./feature_activation'), exist_ok=True)
     for images, target in metric_logger.log_every(data_loader, 10, header):
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
-        i+=1
 
         if adv == 'FGSM':
             std_imagenet = torch.tensor((0.229, 0.224, 0.225)).view(3,1,1).cuda()
@@ -252,14 +251,31 @@ def evaluate(data_loader, model, device, epoch, output_dir, mask=None, adv=None)
                 output, feature_map = model(images)
             loss = criterion(output, target)
             
+        if mask is None:
+            acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        else:
+            acc1, acc5 = accuracy(output[:,mask], target, topk=(1, 5))
+            
         # visual_tokens = feature_map[:, 1:, :].cpu().detach().numpy()  # Exclude [CLS] token
         # avg_activations = np.mean(visual_tokens, axis=-1)
         # activation_map = avg_activations.reshape(-1, 14, 14)
         
-        if epoch%10==0:
-            if ((i % 50)<5) and i<500: # i must smaller than batch size
-                j= i % 50
-                visual_tokens = feature_map[j, 1:, :].cpu().detach().numpy()  # Exclude [CLS] token
+        if args.save_FAM:
+            FAM_dir = os.path.join(output_dir,'./feature_activation')
+            os.makedirs(FAM_dir, exist_ok=True)
+            
+            idx_to_class = {v:k for k,v in data_loader.dataset.class_to_idx.items()}
+            class_name=None
+            for i in range(images.shape[0]):
+                if class_name != idx_to_class[target[i].item()]:
+                    j=0
+                else:
+                    j+=1
+                class_name = idx_to_class[target[i].item()]
+                FAM_path = os.path.join(FAM_dir, class_name)
+                os.makedirs(FAM_path, exist_ok=True)
+                
+                visual_tokens = feature_map[i, 1:, :].cpu().detach().numpy()  # Exclude [CLS] token
                 avg_token_feature = np.mean(visual_tokens, axis=0)
                 # activation = (visual_tokens - avg_token_feature).norm(dim=-1)
                 activation = np.linalg.norm(visual_tokens - avg_token_feature, axis=-1)
@@ -267,23 +283,28 @@ def evaluate(data_loader, model, device, epoch, output_dir, mask=None, adv=None)
                 mag_min, mag_max = activation.min(), activation.max()
                 mag_activation = (activation - mag_min) / (mag_max - mag_min)
                 activation_map = mag_activation.reshape(14, 14)
-                save_predictions(images[j], activation_map, save_dir=os.path.join(output_dir,'./feature_activation'), i=i, epoch=epoch)
-
-        
-
-        if mask is None:
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        else:
-            acc1, acc5 = accuracy(output[:,mask], target, topk=(1, 5))
-
+                save_predictions(images[i], activation_map, FAM_path, j)
 
         batch_size = images.shape[0]
         metric_logger.update(loss=loss.item())
         metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
         metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
+        if args.save_test_dataframe and (data_loader.batch_size==50):
+            assert target.unique().size()[0]==1, "Batch Size must 50, Every label should be Same"
+            class_to_idx = data_loader.dataset.class_to_idx
+            idx_to_class = {idx:class_ for class_, idx in class_to_idx.items()}
+            
+            acc_each_class.append([target[0].item(),idx_to_class[target[0].item()], acc1.item(), acc5.item()])
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
+    if args.save_test_dataframe and (data_loader.batch_size==50):
+        df = pd.DataFrame(acc_each_class, columns=["idx", "label","acc1", "acc5"])
+        df.to_csv(os.path.join(output_dir,'./acc_each_class.csv'), index=False)
+        df_sorted_by_acc1 = df.sort_values(by="acc1", ascending=True)
+        df_sorted_by_acc1.to_csv(os.path.join(output_dir,'./acc1_each_class.csv'), index=False)
+        df_sorted_by_acc5 = df.sort_values(by="acc5", ascending=True)
+        df_sorted_by_acc5.to_csv(os.path.join(output_dir,'./acc5_each_class.csv'), index=False)
     print('================== Acc@1 {top1.global_avg:.3f} | Acc@5 {top5.global_avg:.3f} | loss {losses.global_avg:.3f}==================='
           .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
-
+        
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}

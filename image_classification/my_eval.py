@@ -56,12 +56,9 @@ if __name__ == '__main__':
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
+    # data
     dataset_val, args.nb_classes = build_dataset(is_train=False, args=args)
-    
-    # sampler_train = torch.utils.data.RandomSampler(dataset_train)
     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-    
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val, sampler=sampler_val,
         batch_size=int(args.batch_size),
@@ -70,7 +67,7 @@ if __name__ == '__main__':
         drop_last=False
     )
         
-    
+    # model
     print(f"Creating model: {args.model}")
     model = create_model(
         args.model,
@@ -81,6 +78,7 @@ if __name__ == '__main__':
         drop_block_rate=None
     )
     
+    # llama load
     if 'llama' in args.model:
         print("Loading LLaMA checkpoints")
         start_time = time.time()
@@ -89,36 +87,22 @@ if __name__ == '__main__':
         checkpoint = torch.load(ckpt_path, map_location="cpu")
         model.llama.custom_load_state_dict(checkpoint, tail=True, strict=False)
         print(f"Loaded in {time.time() - start_time:.2f} seconds") 
-        
+    
+    # multi GPU
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)  
     model.to(device)
     
-    model_ema = None
-    if args.model_ema: # default True
-        # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
-        model_ema = ModelEma(
-            model,
-            decay=args.model_ema_decay,
-            device='cpu' if args.model_ema_force_cpu else '',
-            resume='')
-    
-    model_without_ddp = model
-    
-    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print('number of params:', n_parameters)
-
-    # lr_scheduler, _ = create_scheduler(args, optimizer)
     teacher_model = None
-    
     criterion = LabelSmoothingCrossEntropy()
     criterion = DistillationLoss(
         criterion, teacher_model, args.distillation_type, args.distillation_alpha, args.distillation_tau
     )
 
-        
+    # model ckpt load
     if args.resume and os.path.isfile(args.resume):
         checkpoint = torch.load(args.resume, map_location='cpu')
+        # if model trained under nn.Parallel option
         if list(checkpoint['model'].keys())[0].startswith('module.'):
             new_state_dict = {key.replace('module.', ''): value for key, value in checkpoint['model'].items()}
             model.load_state_dict(new_state_dict)
@@ -130,7 +114,7 @@ if __name__ == '__main__':
         test_transform = build_transform(False, args)
 
         if not (args.inc_path or args.ina_path or args.inr_path or args.insk_path or args.pgd_test or args.fgsm_test):
-            test_stats = evaluate(data_loader_val, model, device, epoch=10, output_dir=output_dir)
+            test_stats = evaluate(data_loader_val, model, device, args, output_dir=output_dir)
             print(f"Accuracy of the network on the {len(dataset_val)} test images: acc@1-{test_stats['acc1']:.1f}% | acc@5-{test_stats['acc5']:.1f}%")
 
         if args.inc_path:

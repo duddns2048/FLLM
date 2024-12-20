@@ -248,7 +248,7 @@ if __name__ == '__main__':
                 with open(os.path.join(output_dir, "log.txt"), "a") as f:
                     f.write(json.dumps(log_stats) + "\n")
                     
-        if args.metric_dataframe:
+        if args.save_train_log_dataframe:
             epoch_data = {
                 "epoch": list(range(1, epoch + 2)),
                 "acc1" : test_acc1_list,

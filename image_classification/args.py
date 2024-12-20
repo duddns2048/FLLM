@@ -2,10 +2,12 @@ import argparse
 
 def get_args_parser():
     parser = argparse.ArgumentParser('RVT training and evaluation script', add_help=False)
-    parser.add_argument('--exp_name', default='debug', type=str)
+    parser.add_argument('--exp_name', default='ViT-S-recon2', type=str)
     parser.add_argument('--batch-size', default=16, type=int)
     parser.add_argument('--epochs', default=300, type=int)
-    parser.add_argument('--metric_dataframe', action='store_true', help="save metric dataframe csv file.")
+    parser.add_argument('--save_train_log_dataframe', action='store_true', help="save train log dataframe csv file.")
+    parser.add_argument('--save_test_dataframe', action='store_true', help="save test log dataframe csv file.")
+    parser.add_argument('--save_FAM', action='store_true', help='Save Feature Activation Map')
 
     # Logging parameters
     parser.add_argument('--wandb', action='store_true', default=False)
@@ -126,7 +128,7 @@ def get_args_parser():
     parser.add_argument('--pretrained', action='store_true', help='load pretrained model')
 
     # Dataset parameters
-    parser.add_argument('--data-path', default='/datasets01/imagenet_full_size/061417/', type=str,
+    parser.add_argument('--data-path', default='./', type=str,
                         help='dataset path')
     parser.add_argument('--data-set', default='IMNET', choices=['CIFAR', 'IMNET', 'INAT', 'INAT19'],
                         type=str, help='Image Net dataset path')
